@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from .disclosure import DisclosureService
 from .errors import ServiceError, ValidationFailed
 from .service import TrialService
 from .storage import connect
@@ -25,8 +26,9 @@ class Response:
 class JsonApplication:
     """将 HTTP 路由映射到领域服务，便于无网络单元测试。"""
 
-    def __init__(self, service: TrialService) -> None:
+    def __init__(self, service: TrialService, disclosure: DisclosureService | None = None) -> None:
         self.service = service
+        self.disclosure = disclosure or DisclosureService(service.connection, service.clock)
 
     @staticmethod
     def _actor(headers: Mapping[str, str]) -> str:
@@ -133,6 +135,43 @@ class JsonApplication:
                     payload["decision"], payload["reason"],
                 )
                 return Response(201, result)
+            if method == "POST" and path == "/passports":
+                result = self.disclosure.issue_passport(
+                    self._actor(normalized_headers),
+                    payload["passport_id"], int(payload["passport_version"]), payload["batch_id"],
+                )
+                return Response(201, result)
+            if method == "POST" and path == "/passports/revoke":
+                result = self.disclosure.revoke_passport(
+                    self._actor(normalized_headers),
+                    payload["passport_id"], int(payload["passport_version"]), payload["reason"],
+                )
+                return Response(200, result)
+            if method == "POST" and path == "/disclosures":
+                result = self.disclosure.create_disclosure(self._actor(normalized_headers), payload)
+                return Response(201, result)
+            if method == "POST" and path == "/disclosures/read":
+                token = payload.get("token", "").strip()
+                audience = payload.get("audience_id")
+                result = self.disclosure.read_disclosure(token, audience)
+                return Response(200, result)
+            if method == "GET" and path == "/disclosures":
+                passport_id = parse_qs(urlparse(target).query).get("passport_id", [None])[0]
+                result = self.disclosure.list_disclosures(
+                    self._actor(normalized_headers), passport_id
+                )
+                return Response(200, {"disclosures": result})
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "withdraw":
+                result = self.disclosure.withdraw_disclosure(
+                    self._actor(normalized_headers), parts[1], payload["reason"]
+                )
+                return Response(200, result)
+            if method == "GET" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "trail":
+                result = self.disclosure.disclosure_trail(self._actor(normalized_headers), parts[1])
+                return Response(200, result)
+            if method == "GET" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "verify":
+                result = self.disclosure.verify_disclosure_scope(self._actor(normalized_headers), parts[1])
+                return Response(200, result)
             return Response(404, {"error": {"code": "route_not_found", "message": "接口不存在"}})
         except ServiceError as exc:
             return Response(exc.status, {"error": {"code": exc.code, "message": str(exc)}})

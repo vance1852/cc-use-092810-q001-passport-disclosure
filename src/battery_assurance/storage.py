@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS protocol_catalog (
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('operator', 'statistician', 'approver', 'auditor')),
+    role TEXT NOT NULL CHECK (role IN ('operator', 'statistician', 'approver', 'auditor', 'custodian')),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 );
 
@@ -157,12 +157,67 @@ CREATE TABLE IF NOT EXISTS audit_events (
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS passport_revisions (
+    passport_revision_id TEXT PRIMARY KEY,
+    passport_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL REFERENCES battery_assets(asset_id),
+    passport_version INTEGER NOT NULL CHECK (passport_version > 0),
+    batch_id TEXT NOT NULL REFERENCES batches(batch_id),
+    analysis_id INTEGER NOT NULL REFERENCES analyses(analysis_id),
+    canonical_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    state TEXT NOT NULL DEFAULT 'issued' CHECK (state IN ('issued', 'revoked')),
+    issued_by TEXT NOT NULL REFERENCES users(user_id),
+    issued_at TEXT NOT NULL,
+    revoked_by TEXT REFERENCES users(user_id),
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    UNIQUE (passport_id, passport_version),
+    UNIQUE (content_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_packages (
+    package_id TEXT PRIMARY KEY,
+    fingerprint_sha256 TEXT NOT NULL CHECK (length(fingerprint_sha256) = 64),
+    passport_revision_id TEXT NOT NULL REFERENCES passport_revisions(passport_revision_id),
+    audience_type TEXT NOT NULL CHECK (audience_type IN ('insurer', 'repairer', 'secondary_buyer')),
+    audience_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    claim_keys_json TEXT NOT NULL,
+    sensitive_policy_json TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    validity_seconds INTEGER NOT NULL CHECK (validity_seconds > 0),
+    package_json TEXT NOT NULL,
+    package_sha256 TEXT NOT NULL CHECK (length(package_sha256) = 64),
+    token_hash TEXT NOT NULL CHECK (length(token_hash) = 64),
+    state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'withdrawn', 'expired', 'revoked')),
+    created_by TEXT NOT NULL REFERENCES users(user_id),
+    created_at TEXT NOT NULL,
+    withdrawn_at TEXT,
+    withdraw_reason TEXT,
+    UNIQUE (fingerprint_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_accesses (
+    access_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id TEXT NOT NULL REFERENCES disclosure_packages(package_id),
+    accessed_at TEXT NOT NULL,
+    result TEXT NOT NULL CHECK (result IN ('delivered', 'denied_expired', 'denied_withdrawn', 'denied_revoked', 'denied_token')),
+    audience_id TEXT,
+    detail TEXT
+);
+
+CREATE INDEX IF NOT EXISTS disclosure_accesses_package_idx
+ON disclosure_accesses(package_id, access_id);
 """
 
 REQUIRED_TABLES = frozenset({
     "schema_meta", "protocol_catalog", "users", "battery_assets", "evidence_revisions", "batches",
     "observations", "idempotency_keys", "exclusion_requests", "analysis_jobs",
     "analyses", "decisions", "audit_events",
+    "passport_revisions", "disclosure_packages", "disclosure_accesses",
 })
 
 
