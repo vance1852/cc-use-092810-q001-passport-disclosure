@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -157,12 +157,110 @@ CREATE TABLE IF NOT EXISTS audit_events (
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS passports (
+    passport_id TEXT PRIMARY KEY,
+    asset_id TEXT NOT NULL REFERENCES battery_assets(asset_id),
+    passport_version TEXT NOT NULL,
+    batch_id TEXT NOT NULL REFERENCES batches(batch_id),
+    analysis_id INTEGER NOT NULL REFERENCES analyses(analysis_id),
+    decision_id INTEGER NOT NULL REFERENCES decisions(decision_id),
+    canonical_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    issued_by TEXT NOT NULL REFERENCES users(user_id),
+    issued_at TEXT NOT NULL,
+    revoked_by TEXT REFERENCES users(user_id),
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    UNIQUE (asset_id, passport_version),
+    UNIQUE (content_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_requests (
+    request_id TEXT PRIMARY KEY,
+    request_sha256 TEXT NOT NULL CHECK (length(request_sha256) = 64),
+    passport_id TEXT NOT NULL REFERENCES passports(passport_id),
+    audience_type TEXT NOT NULL CHECK (audience_type IN ('insurer', 'repair_contractor', 'secondary_buyer', 'other')),
+    audience_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    statement_keys_json TEXT NOT NULL,
+    redaction_policy TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    requested_by TEXT NOT NULL REFERENCES users(user_id),
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS disclosure_request_dedup
+ON disclosure_requests(request_sha256);
+
+CREATE TABLE IF NOT EXISTS disclosure_packages (
+    package_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES disclosure_requests(request_id),
+    passport_id TEXT NOT NULL REFERENCES passports(passport_id),
+    package_version INTEGER NOT NULL CHECK (package_version > 0),
+    audience_type TEXT NOT NULL,
+    audience_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    statement_keys_json TEXT NOT NULL,
+    redaction_policy TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    envelope_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    issued_by TEXT NOT NULL REFERENCES users(user_id),
+    issued_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn', 'expired')),
+    withdrawn_at TEXT,
+    withdrawn_by TEXT REFERENCES users(user_id),
+    withdraw_reason TEXT,
+    UNIQUE (request_id),
+    UNIQUE (content_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS package_statements (
+    package_id TEXT NOT NULL REFERENCES disclosure_packages(package_id),
+    statement_key TEXT NOT NULL,
+    visible_json TEXT NOT NULL,
+    claim_json TEXT NOT NULL,
+    source_record TEXT NOT NULL,
+    source_content_sha256 TEXT NOT NULL CHECK (length(source_content_sha256) = 64),
+    redacted_fields_json TEXT NOT NULL,
+    claim_sha256 TEXT NOT NULL CHECK (length(claim_sha256) = 64),
+    PRIMARY KEY (package_id, statement_key)
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_grants (
+    grant_token_hash TEXT PRIMARY KEY,
+    package_id TEXT NOT NULL REFERENCES disclosure_packages(package_id),
+    audience_type TEXT NOT NULL,
+    audience_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    last_offered_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS disclosure_access_log (
+    access_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id TEXT REFERENCES disclosure_packages(package_id),
+    package_version INTEGER,
+    audience_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    result TEXT NOT NULL CHECK (result IN ('served', 'denied_expired', 'denied_not_yet_valid', 'denied_withdrawn', 'denied_revoked', 'denied_tampered', 'denied_unknown_token')),
+    denial_reason TEXT,
+    actor_id TEXT,
+    accessed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS disclosure_access_package ON disclosure_access_log(package_id, access_id);
 """
 
 REQUIRED_TABLES = frozenset({
     "schema_meta", "protocol_catalog", "users", "battery_assets", "evidence_revisions", "batches",
     "observations", "idempotency_keys", "exclusion_requests", "analysis_jobs",
     "analyses", "decisions", "audit_events",
+    "passports", "disclosure_requests", "disclosure_packages", "package_statements",
+    "disclosure_grants", "disclosure_access_log",
 })
 
 

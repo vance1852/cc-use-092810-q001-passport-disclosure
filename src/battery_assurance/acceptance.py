@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 
+from .clock import isoformat
+from .disclosure import DisclosureService
 from .jsonio import load_json
 from .service import TrialService
 from .storage import connect, inspect_schema
@@ -25,6 +28,7 @@ def run(workspace: Path) -> dict[str, object]:
         connection = connect(database)
         try:
             service = TrialService(connection)
+            disclosures = DisclosureService(connection, service.clock)
             service.create_user("operator-1", "测试操作员", "operator")
             service.create_user("stat-1", "统计负责人", "statistician")
             service.create_user("approver-1", "分析准入审批人", "approver")
@@ -47,10 +51,51 @@ def run(workspace: Path) -> dict[str, object]:
                 "approver-1", "batch-demo", analysis["analysis_id"], decision_value, "离线验收决定"
             )
             report = service.report("auditor-1", "batch-demo")
+
+            # 受众化披露：保险机构、维修承包商、二手受让方各取所需声明。
+            passport = disclosures.issue_passport("operator-1", "passport-demo", "2026.09.1", "batch-demo")
+            now = service.clock.now()
+            valid_from = isoformat(now - timedelta(minutes=1))
+            valid_until = isoformat(now + timedelta(days=30))
+            insurer = disclosures.create_disclosure(
+                "operator-1", "passport-demo", "insurer", "insurer-demo", "承保风险定价",
+                ["asset_identity", "assessment_summary", "decision"],
+                valid_from, valid_until,
+            )
+            repairer = disclosures.create_disclosure(
+                "operator-1", "passport-demo", "repair_contractor", "repairer-demo", "制定维修方案",
+                ["asset_identity", "capacity_metrics", "assessment_rules"],
+                valid_from, valid_until,
+            )
+            buyer = disclosures.create_disclosure(
+                "operator-1", "passport-demo", "secondary_buyer", "buyer-demo", "二手受让尽调",
+                ["asset_identity", "evidence_provenance", "assessment_summary", "decision"],
+                valid_from, valid_until, "full",
+            )
+            insurer_read = disclosures.read_disclosure(insurer["grant_token"])
+            repairer_read = disclosures.read_disclosure(repairer["grant_token"])
+            buyer_read = disclosures.read_disclosure(buyer["grant_token"])
+            if len(insurer_read["envelope"]["statements"]) != 3:
+                raise RuntimeError("保险机构披露包声明范围错误")
+            if len(repairer_read["envelope"]["statements"]) != 3:
+                raise RuntimeError("维修承包商披露包声明范围错误")
+            if len(buyer_read["envelope"]["statements"]) != 4:
+                raise RuntimeError("二手受让方披露包声明范围错误")
+            # 同一申请重试必须返回原包。
+            replayed = disclosures.create_disclosure(
+                "operator-1", "passport-demo", "insurer", "insurer-demo", "承保风险定价",
+                ["asset_identity", "assessment_summary", "decision"],
+                valid_from, valid_until,
+            )
+            if not replayed["replayed"] or replayed["package_id"] != insurer["package_id"]:
+                raise RuntimeError("同申请重试未返回原披露包")
+            verification = disclosures.verify_package("auditor-1", insurer["package_id"])
+            ledger = disclosures.disclosure_ledger("auditor-1")
+            access = disclosures.access_report("auditor-1", insurer["package_id"])
             schema = inspect_schema(connection)
         finally:
             connection.close()
-    if schema["missing_tables"] or schema["schema_version"] != "2":
+    if schema["missing_tables"] or schema["schema_version"] != "3":
         raise RuntimeError("SQLite 基础结构检查失败")
     return {
         "status": "ok",
@@ -61,6 +106,11 @@ def run(workspace: Path) -> dict[str, object]:
         "conclusion": analysis["result"]["conclusion"],
         "decision": report["decision"]["decision"],
         "event_count": len(report["events"]),
+        "passport_sha256": passport["sha256"],
+        "disclosure_packages": len(ledger),
+        "insurer_statement_count": len(insurer_read["envelope"]["statements"]),
+        "disclosure_intact": verification["envelope_intact"],
+        "insurer_access_events": len(access),
         "schema": schema,
     }
 

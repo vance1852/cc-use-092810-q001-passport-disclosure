@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from .disclosure import DisclosureService
 from .errors import ServiceError, ValidationFailed
 from .service import TrialService
 from .storage import connect
@@ -27,6 +28,7 @@ class JsonApplication:
 
     def __init__(self, service: TrialService) -> None:
         self.service = service
+        self.disclosures = DisclosureService(service.connection, service.clock)
 
     @staticmethod
     def _actor(headers: Mapping[str, str]) -> str:
@@ -133,6 +135,49 @@ class JsonApplication:
                     payload["decision"], payload["reason"],
                 )
                 return Response(201, result)
+            # ------------------------------------------------- 电池护照与受众披露
+            if method == "POST" and path == "/passports":
+                result = self.disclosures.issue_passport(
+                    self._actor(normalized_headers), payload["passport_id"],
+                    payload["passport_version"], payload["batch_id"],
+                )
+                return Response(201, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "passports" and parts[2] == "revoke":
+                result = self.disclosures.revoke_passport(
+                    self._actor(normalized_headers), parts[1], payload["reason"]
+                )
+                return Response(200, result)
+            if method == "POST" and path == "/disclosures":
+                result = self.disclosures.create_disclosure(
+                    self._actor(normalized_headers),
+                    payload["passport_id"], payload["audience_type"], payload["audience_ref"],
+                    payload["purpose"], list(payload["statement_keys"]),
+                    payload["valid_from"], payload["valid_until"],
+                    payload.get("redaction_policy", "mask_commercial"),
+                )
+                return Response(201, result)
+            if method == "POST" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "withdraw":
+                result = self.disclosures.withdraw_package(
+                    self._actor(normalized_headers), parts[1], payload["reason"]
+                )
+                return Response(200, result)
+            if method == "POST" and len(parts) == 2 and parts[0] == "disclosures" and parts[1] == "read":
+                grant_token = normalized_headers.get("x-grant-token", payload.get("grant_token", ""))
+                result = self.disclosures.read_disclosure(grant_token, payload.get("audience_ref"))
+                return Response(200, result)
+            if method == "GET" and len(parts) == 3 and parts[0] == "disclosures" and parts[2] == "verify":
+                result = self.disclosures.verify_package(self._actor(normalized_headers), parts[1])
+                return Response(200, result)
+            if method == "GET" and len(parts) == 2 and parts[0] == "disclosures" and parts[1] == "ledger":
+                query = parse_qs(urlparse(target).query)
+                audience_ref = query.get("audience_ref", [None])[0]
+                result = self.disclosures.disclosure_ledger(self._actor(normalized_headers), audience_ref)
+                return Response(200, {"packages": result})
+            if method == "GET" and len(parts) == 2 and parts[0] == "disclosures" and parts[1] == "access":
+                query = parse_qs(urlparse(target).query)
+                package_id = query.get("package_id", [None])[0]
+                result = self.disclosures.access_report(self._actor(normalized_headers), package_id)
+                return Response(200, {"events": result})
             return Response(404, {"error": {"code": "route_not_found", "message": "接口不存在"}})
         except ServiceError as exc:
             return Response(exc.status, {"error": {"code": exc.code, "message": str(exc)}})

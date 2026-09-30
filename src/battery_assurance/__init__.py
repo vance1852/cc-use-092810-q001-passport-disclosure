@@ -2,6 +2,7 @@
 
 from .contracts import Observation, Protocol, ValidationError
 from .analysis import ALGORITHM_VERSION, analyze, bootstrap_mean_interval
+from .disclosure import DisclosureService
 from .numeric import NumericSummary, WilsonInterval
 from .service import TrialService
 
@@ -12,6 +13,7 @@ __all__ = [
     "ValidationError",
     "WilsonInterval",
     "ALGORITHM_VERSION",
+    "DisclosureService",
     "TrialService",
     "analyze",
     "bootstrap_mean_interval",
